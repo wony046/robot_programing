@@ -3,6 +3,7 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Pose
+from std_msgs.msg import Bool
 from cv_bridge import CvBridge
 
 import cv2
@@ -44,6 +45,8 @@ class ArucoDetectorNode_Realsense(Node):
         # Publisher
         self.image_pub = self.create_publisher(Image, '/aruco/image', 10)
         self.pose_pub = self.create_publisher(Pose, '/aruco/pose', 10)
+        # 매 프레임 인식 여부 (False 가 오면 추종 노드가 즉시 정지)
+        self.detected_pub = self.create_publisher(Bool, '/aruco/detected', 10)
 
         self.get_logger().info('ArucoDetectorNode start ~~ (Realsense)')
 
@@ -109,12 +112,14 @@ class ArucoDetectorNode_Realsense(Node):
             pose_msg.orientation.z = quaternion[2]
             pose_msg.orientation.w = quaternion[3]
             self.pose_pub.publish(pose_msg)
+            self.detected_pub.publish(Bool(data=True))
 
             self.get_logger().info(
                 f'marker x={tvec[0]:+.3f} y={tvec[1]:+.3f} z={tvec[2]:.3f}',
                 throttle_duration_sec=0.5)
         else:
-            cv2.putText(frame, 'No marker', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            self.detected_pub.publish(Bool(data=False))
+            cv2.putText(frame, 'No marker -> STOP', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         # OpenCV -> ROS Image
         out_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')

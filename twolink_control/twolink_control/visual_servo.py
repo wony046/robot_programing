@@ -34,6 +34,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Pose, Point
+from std_msgs.msg import Bool
 from visualization_msgs.msg import Marker, MarkerArray
 from twolink_msgs.msg import CMD, XYpos
 
@@ -124,7 +125,10 @@ class VisualServoNode(Node):
         self.gain = p('gain', 6.0).value                    # 목표각 추종 게인 [1/s]
         self.filter_alpha = p('filter_alpha', 0.5).value    # 마커 base 좌표 저역통과 (1: 필터 없음)
         self.deadband = p('deadband', 0.008).value          # 목표각 오차 무시 범위 [rad]
-        self.marker_timeout = p('marker_timeout', 0.3).value  # [s]
+        # 마커 인식 실패 프레임이 lost_frames 개 연속이면 즉시 정지 (1: 한 프레임만 놓쳐도 정지)
+        self.lost_frames = p('lost_frames', 1).value
+        # /aruco/detected 가 끊긴 경우(인식 노드 정지 등)의 안전 타임아웃
+        self.marker_timeout = p('marker_timeout', 0.15).value  # [s]
         self.state_timeout = p('state_timeout', 0.5).value    # [s]
         self.rate = p('rate', 20.0).value                   # [Hz]
         # 관절 회전 제한 (기본: 사용 안 함). use_joint_limits:=true 면 아래 범위 적용
@@ -144,7 +148,9 @@ class VisualServoNode(Node):
         self.dry_run = p('dry_run', False).value
 
         self.q = None
+        self.qvel = np.zeros(2)
         self.q_time = 0.0
+        self.missed = 0             # 연속 인식 실패 프레임 수
         self.p_marker = None        # 필터된 마커 base 좌표 [x, y]
         self.marker_y = 0.0         # 카메라 좌표계 Y (표시용 높이)
         self.marker_time = 0.0
@@ -155,6 +161,7 @@ class VisualServoNode(Node):
         self.last_log = 0.0
 
         self.create_subscription(Pose, '/aruco/pose', self.marker_callback, 10)
+        self.create_subscription(Bool, '/aruco/detected', self.detected_callback, 10)
         self.create_subscription(XYpos, 'robot_state', self.state_callback, 10)
         self.cmd_pub = self.create_publisher(CMD, 'des_value', 10)
         self.viz_pub = self.create_publisher(MarkerArray, '/visual_servo/markers', 10)
@@ -168,7 +175,32 @@ class VisualServoNode(Node):
     # ---------------- 콜백 ----------------
     def state_callback(self, msg):
         self.q = np.array([msg.qpos1, msg.qpos2], dtype=float)
+        self.qvel = np.array([msg.qvel1, msg.qvel2], dtype=float)
+        if not np.all(np.isfinite(self.qvel)):
+            self.qvel = np.zeros(2)
         self.q_time = time.monotonic()
+
+    def estimate_q(self):
+        """지금 이 순간의 실제 관절각 추정 (마지막 측정 + 속도 x 경과시간)."""
+        age = min(time.monotonic() - self.q_time, 0.15)
+        return self.q + self.qvel * age
+
+    def detected_callback(self, msg):
+        if msg.data:
+            self.missed = 0
+            return
+        self.missed += 1
+        if self.missed >= self.lost_frames and self.tracking:
+            self.stop_now('Marker lost')
+
+    def stop_now(self, reason):
+        """추종을 멈추고 로봇을 지금 위치에 즉시 정지시킨다."""
+        self.tracking = False
+        if self.q is None:
+            return
+        self.q_cmd = self.estimate_q()
+        self.publish(self.q_cmd)    # 타이머를 기다리지 않고 바로 정지 명령
+        self.get_logger().warning(f'{reason} -> STOP at q=({self.q_cmd[0]:+.3f},{self.q_cmd[1]:+.3f})')
 
     def marker_callback(self, msg):
         X, Z = msg.position.x, msg.position.z
@@ -178,8 +210,8 @@ class VisualServoNode(Node):
         o, d, x = camera_fk(self.q[0], self.q[1], self.L1, self.cam_x, self.cam_y, self.cam_yaw)
         p_new = o + X * x + Z * d
         now = time.monotonic()
-        if self.p_marker is None or now - self.marker_time > self.marker_timeout:
-            self.p_marker = p_new
+        if self.p_marker is None or not self.tracking or now - self.marker_time > self.marker_timeout:
+            self.p_marker = p_new       # 다시 보이기 시작하면 필터 초기화 (이전 위치 무시)
         else:
             a = self.filter_alpha
             self.p_marker = a * p_new + (1.0 - a) * self.p_marker
@@ -195,19 +227,20 @@ class VisualServoNode(Node):
         if self.q_cmd is None:
             self.q_cmd = self.q.copy()
 
-        marker_ok = self.p_marker is not None and now - self.marker_time < self.marker_timeout
+        marker_ok = (self.p_marker is not None
+                     and now - self.marker_time < self.marker_timeout
+                     and self.missed < self.lost_frames)
         if not marker_ok:
             if self.tracking:
-                self.get_logger().warning('Marker lost -> hold position')
-                self.q_cmd = self.q.copy()
-                self.tracking = False
+                self.stop_now('Marker timeout')
             if self.commanded:
+                # 정지 위치를 계속 유지
                 self.publish(self.q_cmd)
             self.log_throttled('Waiting for marker...')
             return
         if not self.tracking:
             self.get_logger().info('Marker found -> tracking')
-            self.q_cmd = self.q.copy()
+            self.q_cmd = self.estimate_q()
             self.tracking = True
 
         # [2] 역기구학으로 목표 관절각
