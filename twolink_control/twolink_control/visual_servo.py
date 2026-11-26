@@ -24,9 +24,10 @@
     D 로는 팔이 닿지 않거나 관절 범위를 넘으면, 범위 안에서 마커를 중앙에 두는
     해 중 거리가 D 에 가장 가까운 해를 고른다 (방향 우선, 거리 2순위).
 
-    관절각 범위: 보드는 관절각을 (-pi, pi] 로 보고하지만 목표각은 wrap 하지 않는다.
-    목표와 측정이 +-pi 경계를 사이에 두면 보드가 오차를 약 2pi 로 보고 반대로
-    휘두른다 -> 목표각은 항상 [-angle_limit, angle_limit] (기본 3.0 rad) 안에만 둔다.
+    연속 관절각: 보드는 관절각을 (-pi, pi] 로 잘라서 보고하지만 목표각은 wrap 하지
+    않는다. 같은 각도를 3.27 / -3.01 처럼 다른 표현으로 번갈아 보내면 보드가 오차를
+    약 2pi 로 보고 반대로 휘두른다(발작). -> 측정값을 이어 붙여 연속 각도로 추적하고
+    목표각도 항상 그 연속 각도로 보낸다 (표현이 뒤집히지 않음). 관절 제한은 기본 없음.
 
 [3] 목표각으로 속도 제한을 두고 부드럽게 이동 -> des_value 발행
 
@@ -66,7 +67,7 @@ def camera_ik(p, D, L1, cx, cy, yaw, q_ref):
     반환: (q, D_actual, reachable)
     """
     sols, D, reachable = camera_ik_all(p, D, L1, cx, cy, yaw, q_ref)
-    best = min(sols, key=lambda q: float(np.sum((q - q_ref) ** 2)))
+    best = near(min(sols, key=lambda q: float(np.sum((near(q, q_ref) - q_ref) ** 2))), q_ref)
     return best, D, reachable
 
 
@@ -106,6 +107,13 @@ def camera_ik_all(p, D, L1, cx, cy, yaw, q_ref=None, margin=0.3):
     return sols, D, reachable
 
 
+def near(q, q_ref):
+    """같은 자세의 각도 표현 중 q_ref(연속 각도)에 가장 가까운 것 (2pi 점프 방지)."""
+    if q_ref is None:
+        return q
+    return np.array([q_ref[0] + wrap(q[0] - q_ref[0]), q_ref[1] + wrap(q[1] - q_ref[1])])
+
+
 def pick_branch(sols, branch, q_ref):
     """역기구학 두 해 중 하나만 선택.
 
@@ -117,7 +125,7 @@ def pick_branch(sols, branch, q_ref):
         return [sols[0]]
     if branch < 0:
         return [sols[1]]
-    return [min(sols, key=lambda q: float(np.sum((q - q_ref) ** 2)))]
+    return [min(sols, key=lambda q: float(np.sum((near(q, q_ref) - q_ref) ** 2)))]
 
 
 def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim, branch=0, margin=0.3,
@@ -137,11 +145,12 @@ def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim, branch=0, ma
         sols, d_act, reachable = camera_ik_all(p, d, L1, cx, cy, yaw, q_ref, margin)
         if not reachable:
             continue
-        ok = [q for q in pick_branch(sols, branch, q_ref) if inside(q)]
+        ok = [near(q, q_ref) for q in pick_branch(sols, branch, q_ref)]
+        ok = [q for q in ok if inside(q)]
         if ok:
             return min(ok, key=lambda q: float(np.sum((q - q_ref) ** 2))), d_act, True
     sols, d_act, _ = camera_ik_all(p, D, L1, cx, cy, yaw, q_ref, margin)
-    q = pick_branch(sols, branch, q_ref)[0]
+    q = near(pick_branch(sols, branch, q_ref)[0], q_ref)
     return np.array([np.clip(q[0], *q1_lim), np.clip(q[1], *q2_lim)]), d_act, False
 
 
@@ -175,16 +184,18 @@ class VisualServoNode(Node):
         self.max_lead = p('max_lead', 0.4).value
         self.state_timeout = p('state_timeout', 0.5).value    # [s]
         self.rate = p('rate', 20.0).value                   # [Hz]
-        # 관절각 범위. 보드가 목표각을 wrap 하지 않으므로 +-pi 경계는 절대 넘지 않는다.
-        a = min(abs(p('angle_limit', 3.0).value), math.pi - 0.02)
-        # use_joint_limits:=true 면 아래의 더 좁은 범위를 추가로 적용
+        # 관절 제한 (기본: 없음). use_joint_limits:=true 면 아래 범위 적용
         self.use_joint_limits = p('use_joint_limits', False).value
         if self.use_joint_limits:
-            self.q1_lim = (max(p('q1_min', -1.57).value, -a), min(p('q1_max', 1.57).value, a))
-            self.q2_lim = (max(p('q2_min', -2.4).value, -a), min(p('q2_max', 2.4).value, a))
+            self.q1_lim = (p('q1_min', -1.57).value, p('q1_max', 1.57).value)
+            self.q2_lim = (p('q2_min', -2.4).value, p('q2_max', 2.4).value)
         else:
-            self.q1_lim = (-a, a)
-            self.q2_lim = (-a, a)
+            # angle_limit > 0 이면 +-angle_limit 로 제한 (기본 0: 제한 없음).
+            # +-pi 를 넘어갈 때 로봇이 떨면 angle_limit:=3.0 으로 경계를 막을 수 있다.
+            a = p('angle_limit', 0.0).value
+            lim = (-a, a) if a > 0 else (-math.inf, math.inf)
+            self.q1_lim = lim
+            self.q2_lim = lim
         # 특이점(팔이 완전히 접히거나 펴짐) 회피 여유 [rad]
         self.sing_margin = p('singularity_margin', 0.3).value
         # 로봇 / 카메라 장착 기하 (link2 좌표계 기준)
@@ -195,7 +206,8 @@ class VisualServoNode(Node):
         self.cam_z = p('camera_height', 0.20).value   # RViz 표시용 카메라 높이 [m]
         self.dry_run = p('dry_run', False).value
 
-        self.q = None
+        self.q = None               # 연속 관절각 (+-pi 에서 잘리지 않음)
+        self.q_raw_prev = None      # 보드가 보고한 직전 관절각 (-pi, pi]
         self.qvel = np.zeros(2)
         self.q_time = 0.0
         self.missed = 0             # 연속 인식 실패 프레임 수
@@ -224,14 +236,21 @@ class VisualServoNode(Node):
 
     # ---------------- 콜백 ----------------
     def state_callback(self, msg):
-        self.q = np.array([msg.qpos1, msg.qpos2], dtype=float)
+        q_raw = np.array([msg.qpos1, msg.qpos2], dtype=float)
+        if self.q_raw_prev is None or self.q is None:
+            self.q = q_raw.copy()
+        else:
+            # +-pi 에서 잘린 측정값을 이어 붙여 연속 각도로 (3.10 -> -3.10 이면 +0.08)
+            self.q = self.q + np.array([wrap(q_raw[0] - self.q_raw_prev[0]),
+                                        wrap(q_raw[1] - self.q_raw_prev[1])])
+        self.q_raw_prev = q_raw
         self.qvel = np.array([msg.qvel1, msg.qvel2], dtype=float)
         if not np.all(np.isfinite(self.qvel)):
             self.qvel = np.zeros(2)
         self.q_time = time.monotonic()
 
     def clip_q(self, q):
-        """목표각을 허용 범위([-angle_limit, angle_limit]) 안으로."""
+        """목표각을 관절 제한 안으로 (기본: 제한 없음)."""
         return np.array([np.clip(q[0], *self.q1_lim), np.clip(q[1], *self.q2_lim)])
 
     def estimate_q(self):
