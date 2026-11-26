@@ -117,6 +117,12 @@ class ArucoDetectorNode_Realsense(Node):
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(frame, f'Dist {tvec[2]*100:.1f} cm  (target {self.desired_distance*100:.0f} cm)',
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            # 마커 정면 각도 psi: 마커 법선 n = R[:, 2], 정면이면 n = (0, 0, -1)
+            n = cv2.Rodrigues(rvec)[0][:, 2]
+            if n[2] < 0:
+                psi = np.degrees(np.arctan2(-n[0], -n[2]))
+                cv2.putText(frame, f'Facing {psi:+.0f} deg  (0 = parallel)',
+                            (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             # 결과 Publish
             pose_msg = Pose()
@@ -164,9 +170,11 @@ class ArucoDetectorNode_Realsense(Node):
             corner = corners[i][0]
 
             # solvePnP를 사용하여 3차원 위치 추정
+            # ITERATIVE: 이 OpenCV(4.5.4)에서 IPPE 계열은 기울어진 마커의 법선을 뒤집어
+            # 내는 경우가 있어 사용하지 않는다 (마커 각도 오차 최대 약 1도로 확인)
             success, rvec, tvec = cv2.solvePnP(
                 object_points, corner, self.camera_matrix, self.dist_coeffs,
-                flags=cv2.SOLVEPNP_IPPE_SQUARE)
+                flags=cv2.SOLVEPNP_ITERATIVE)
 
             if success and tvec[2, 0] > 0:
                 quaternion = Rotation.from_rotvec(rvec.flatten()).as_quat() # xyzw

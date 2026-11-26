@@ -29,6 +29,16 @@
     약 2pi 로 보고 반대로 휘두른다(발작). -> 측정값을 이어 붙여 연속 각도로 추적하고
     목표각도 항상 그 연속 각도로 보낸다 (표현이 뒤집히지 않음). 관절 제한은 기본 없음.
 
+[2.5] 거리 선택 (방향 1순위, 거리/정면 2순위)
+    중앙 정렬(마커를 광축 위에)은 항상 지키는 조건이다. 그래도 자유도가 1개 남는데
+    (거리 D), D 에 따라 카메라가 마커를 보는 각도 psi 가 달라진다.
+      n      = R(q_marker)[:, 2]                 (마커 법선, 카메라 좌표계)
+      n_w    = n_x * x + n_z * d                  (마커 법선, base 수평면)
+      psi(D) = (IK(D) 의 광축 각) - atan2(-n_w)   (0 = 마커와 평행하게 정면)
+      J(D)   = ((D - D*) / s_d)^2 + w_psi * (psi(D) / s_psi)^2
+    J 가 최소인 D 를 고르고, 거리 목표를 그 D 로 천천히 옮긴다.
+    (2자유도라 위치와 정면 각도를 동시에 정확히 맞출 수는 없어 가중 비용으로 절충)
+
 [3] 목표각으로 속도 제한을 두고 부드럽게 이동 -> des_value 발행
 
 입력  /aruco/pose (geometry_msgs/Pose), robot_state (twolink_msgs/XYpos)
@@ -108,6 +118,15 @@ def camera_ik_all(p, D, L1, cx, cy, yaw, q_ref=None, margin=0.3):
     return sols, D, reachable
 
 
+def marker_normal(qx, qy, qz, qw):
+    """마커 자세 쿼터니언 -> 마커 법선 n = R[:, 2] (카메라 좌표계). 정면이면 (0, 0, -1)."""
+    nrm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    if nrm < 1e-9:
+        return None
+    x, y, z, w = qx / nrm, qy / nrm, qz / nrm, qw / nrm
+    return np.array([2 * (x * z + w * y), 2 * (y * z - w * x), 1 - 2 * (x * x + y * y)])
+
+
 def near(q, q_ref):
     """같은 자세의 각도 표현 중 q_ref(연속 각도)에 가장 가까운 것 (2pi 점프 방지)."""
     if q_ref is None:
@@ -170,6 +189,14 @@ class VisualServoNode(Node):
         # 거리 목표를 현재 거리 -> desired_distance 로 옮기는 속도 [m/s].
         # IK 해는 매 순간 마커를 세로선 위에 두므로 방향이 먼저 맞고 거리는 뒤따른다.
         self.distance_rate = p('distance_rate', 0.4).value
+        # 거리와 마커 정면 각도(psi) 절충 비용 J = (dD/s_d)^2 + w*(psi/s_psi)^2
+        #   facing_weight 0: 거리만 맞춤, 1: psi 10도 = 거리 5cm 와 같은 비중
+        self.facing_weight = p('facing_weight', 1.0).value
+        self.distance_scale = p('distance_scale', 0.05).value          # [m]
+        self.facing_scale = math.radians(p('facing_scale_deg', 10.0).value)
+        self.filter_facing = p('filter_facing', 0.3).value             # 법선 방향 필터
+        self.d_min = p('distance_min', 0.15).value
+        self.d_max = p('distance_max', 0.60).value
         # 역기구학 두 해 중 사용할 해: 'positive'(초기 자세 q2=+90도 쪽), 'negative', 'nearest'
         elbow = str(p('elbow', 'positive').value).lower()
         self.branch = {'positive': 1, 'negative': -1}.get(elbow, 0)
@@ -215,6 +242,9 @@ class VisualServoNode(Node):
         self.missed = 0             # 연속 인식 실패 프레임 수
         self.p_marker = None        # 필터된 마커 base 좌표 [x, y]
         self.marker_range = None    # 필터된 카메라-마커 거리 Z [m]
+        self.normal_ang = None      # 마커 법선 방향 (base 수평면 각도, 필터됨)
+        self.normal_time = 0.0
+        self.psi = None             # 현재 목표 자세의 정면 각도 오차 [rad]
         self.D_eff = None           # 지금 IK 에 쓰는 거리 목표 (desired_distance 로 점진 이동)
         self.marker_y = 0.0         # 카메라 좌표계 Y (표시용 높이)
         self.marker_time = 0.0
@@ -238,12 +268,43 @@ class VisualServoNode(Node):
             'filter_direction': 'filter_dir', 'filter_distance': 'filter_dist',
             'deadband': 'deadband', 'lost_frames': 'lost_frames',
             'marker_timeout': 'marker_timeout', 'singularity_margin': 'sing_margin',
+            'facing_weight': 'facing_weight', 'distance_scale': 'distance_scale',
+            'filter_facing': 'filter_facing',
         }
         self.add_on_set_parameters_callback(self.on_param_change)
 
         self.get_logger().info(
             f'Visual servo (IK) start: distance={self.desired_distance:.2f} m'
             + (' [DRY RUN - no commands sent]' if self.dry_run else ''))
+
+    def choose_distance(self):
+        """중앙 정렬을 지키는 자세들 중 J(D) 가 최소인 거리 D 와 그때의 psi."""
+        facing_ok = (self.facing_weight > 0 and self.normal_ang is not None
+                     and time.monotonic() - self.normal_time < 0.5)
+        if not facing_ok:
+            return self.desired_distance, None
+        want = self.normal_ang + math.pi        # 광축이 바라봐야 할 방향 (-n)
+        best = None
+        n = int(round((self.d_max - self.d_min) / 0.01))
+        for i in range(n + 1):
+            D = self.d_min + 0.01 * i
+            sols, d_act, reachable = camera_ik_all(
+                self.p_marker, D, self.L1, self.cam_x, self.cam_y, self.cam_yaw,
+                self.q_cmd, self.sing_margin)
+            if not reachable:
+                continue
+            q = near(pick_branch(sols, self.branch, self.q_cmd)[0], self.q_cmd)
+            if not (self.q1_lim[0] <= q[0] <= self.q1_lim[1]
+                    and self.q2_lim[0] <= q[1] <= self.q2_lim[1]):
+                continue
+            psi = wrap(q[0] + q[1] + self.cam_yaw - want)
+            cost = (((D - self.desired_distance) / self.distance_scale) ** 2
+                    + self.facing_weight * (psi / self.facing_scale) ** 2)
+            if best is None or cost < best[0]:
+                best = (cost, D, psi)
+        if best is None:
+            return self.desired_distance, None
+        return best[1], best[2]
 
     def on_param_change(self, params):
         for prm in params:
@@ -317,6 +378,18 @@ class VisualServoNode(Node):
         self.marker_y = msg.position.y
         self.marker_time = now
 
+        # 마커 법선 (정면 각도용). n_z > -0.2 면 뒤집힌 해이거나 너무 비스듬 -> 무시
+        n = marker_normal(msg.orientation.x, msg.orientation.y,
+                          msg.orientation.z, msg.orientation.w)
+        if n is not None and n[2] < -0.2:
+            n_w = n[0] * x + n[2] * d           # base 수평면으로
+            ang = math.atan2(n_w[1], n_w[0])
+            if self.normal_ang is None or now - self.normal_time > 0.5:
+                self.normal_ang = ang
+            else:
+                self.normal_ang += self.filter_facing * wrap(ang - self.normal_ang)
+            self.normal_time = now
+
     # ---------------- 제어 루프 ----------------
     def control_loop(self):
         now = time.monotonic()
@@ -343,9 +416,10 @@ class VisualServoNode(Node):
             self.D_eff = self.marker_range   # 거리는 지금 거리에서 시작 (방향부터 맞춤)
             self.tracking = True
 
-        # 거리 목표를 desired_distance 쪽으로 천천히 이동 (거리는 2순위)
+        # 거리 목표: 거리 + 정면 각도 절충 (2순위). 천천히 이동 -> 방향(중앙)이 먼저 맞음
+        D_target, self.psi = self.choose_distance()
         step = self.distance_rate * self.dt
-        self.D_eff += float(np.clip(self.desired_distance - self.D_eff, -step, step))
+        self.D_eff += float(np.clip(D_target - self.D_eff, -step, step))
 
         # [2] 역기구학으로 목표 관절각 (마커를 세로선 위, 거리 D_eff 에)
         q_goal, D, ok = camera_ik_limited(
@@ -375,7 +449,8 @@ class VisualServoNode(Node):
         self.log_throttled(
             f'marker base=({self.p_marker[0]:+.3f},{self.p_marker[1]:+.3f}) '
             f'| IK goal q=({q_goal[0]:+.3f},{q_goal[1]:+.3f})'
-            f' D={D:.2f}{"" if reachable else f"->{self.desired_distance:.2f}"} '
+            f' D={D:.2f}{"" if reachable else f"->{self.desired_distance:.2f}"}'
+            f'{"" if self.psi is None else f" psi={math.degrees(self.psi):+.0f}deg"} '
             f'| q=({self.q[0]:+.3f},{self.q[1]:+.3f}) cmd=({self.q_cmd[0]:+.3f},{self.q_cmd[1]:+.3f})')
 
     def publish(self, q):
@@ -418,7 +493,16 @@ class VisualServoNode(Node):
         ray.points = [goal.pose.position,
                       Point(x=float(o_goal[0] + D * d_goal[0]),
                             y=float(o_goal[1] + D * d_goal[1]), z=self.cam_z)]
-        self.viz_pub.publish(MarkerArray(markers=[aruco, goal, ray]))
+        markers = [aruco, goal, ray]
+        if self.normal_ang is not None:
+            # 마커 법선 (마커가 바라보는 방향, 빨강)
+            arrow = mk(3, Marker.ARROW, (1.0, 0.2, 0.2), (0.008, 0.016, 0.02))
+            arrow.points = [aruco.pose.position,
+                            Point(x=float(self.p_marker[0] + 0.12 * math.cos(self.normal_ang)),
+                                  y=float(self.p_marker[1] + 0.12 * math.sin(self.normal_ang)),
+                                  z=z_marker)]
+            markers.append(arrow)
+        self.viz_pub.publish(MarkerArray(markers=markers))
 
     def log_throttled(self, text, period=0.5):
         now = time.monotonic()
