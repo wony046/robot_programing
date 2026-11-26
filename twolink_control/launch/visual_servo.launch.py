@@ -24,6 +24,8 @@ def generate_launch_description():
                               description='마커와 유지할 거리 [m]'),
         DeclareLaunchArgument('target_id', default_value='-1',
                               description='추종할 마커 ID (-1: 가장 크게 보이는 마커)'),
+        DeclareLaunchArgument('elbow', default_value='positive',
+                              description='역기구학 해 선택: positive / negative / nearest'),
         DeclareLaunchArgument('dry_run', default_value='false',
                               description='true: 로봇에 명령을 보내지 않고 계산만'),
         DeclareLaunchArgument('use_camera', default_value='true'),
@@ -75,7 +77,8 @@ def generate_launch_description():
         ),
         Node(
             package='twolink_control', executable='visual_servo_node',
-            parameters=[{'desired_distance': distance, 'dry_run': dry_run}],
+            parameters=[{'desired_distance': distance, 'dry_run': dry_run,
+                         'elbow': LaunchConfiguration('elbow')}],
             output='screen',
         ),
         Node(
