@@ -196,8 +196,9 @@ class VisualServoNode(Node):
             lim = (-a, a) if a > 0 else (-math.inf, math.inf)
             self.q1_lim = lim
             self.q2_lim = lim
-        # 특이점(팔이 완전히 접히거나 펴짐) 회피 여유 [rad]
-        self.sing_margin = p('singularity_margin', 0.3).value
+        # 특이점(팔이 완전히 접히거나 펴짐) 회피 여유 [rad]. 기본 0 = 회전 제한 없음.
+        # 접힌 자세에서 떨면 0.2~0.3 으로 올린다.
+        self.sing_margin = p('singularity_margin', 0.0).value  # 0: 제한 없음 (팔 완전히 접기/펴기 허용)
         # 로봇 / 카메라 장착 기하 (link2 좌표계 기준)
         self.L1 = p('link1_length', 0.143).value
         self.cam_x = p('camera_offset_x', 0.06).value
