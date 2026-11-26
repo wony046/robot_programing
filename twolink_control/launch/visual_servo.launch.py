@@ -1,4 +1,5 @@
-"""마커 추종 전체 실행: RealSense + 마커 인식 + 시리얼 + 시각 서보 (+ 결과 영상 뷰어)
+"""마커 추종 전체 실행: RealSense + 마커 인식 + 시리얼 + 시각 서보
+                     + 결과 영상 뷰어 + RViz/Gazebo 시각화
 
 ros2 launch twolink_control visual_servo.launch.py port:=/dev/ttyACM0 distance:=0.30
 """
@@ -27,6 +28,23 @@ def generate_launch_description():
         DeclareLaunchArgument('use_camera', default_value='true'),
         DeclareLaunchArgument('use_serial', default_value='true'),
         DeclareLaunchArgument('use_viewer', default_value='true'),
+        DeclareLaunchArgument('use_rviz', default_value='true',
+                              description='RViz 로봇 모델 시각화 (robot_state 연동)'),
+        DeclareLaunchArgument('use_gazebo', default_value='true',
+                              description='Gazebo 시각화 (use_rviz:=true 일 때)'),
+
+        # RViz(+Gazebo): twolink_gazebo 의 launch 재사용, joint_publisher 가 실제 관절각을 반영
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(PathJoinSubstitution([
+                FindPackageShare('twolink_gazebo'), 'launch', 'gazebo.launch.py'])),
+            launch_arguments={'use_gazebo': LaunchConfiguration('use_gazebo')}.items(),
+            condition=IfCondition(LaunchConfiguration('use_rviz')),
+        ),
+        Node(
+            package='twolink_gazebo', executable='joint_publisher.py',
+            condition=IfCondition(LaunchConfiguration('use_rviz')),
+            output='log',
+        ),
 
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([

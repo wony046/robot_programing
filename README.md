@@ -78,7 +78,8 @@ ros2 run twolink_control command_node      # e/d: 관절1 +/-, r/f: 관절2 +/-
 ```bash
 ros2 launch twolink_control visual_servo.launch.py port:=/dev/ttyACM0 distance:=0.30
 ```
-RealSense, 마커 인식, 시리얼, 시각 서보 노드와 결과 영상 뷰어(`/aruco/image`)가 한 번에 실행됩니다.
+RealSense, 마커 인식, 시리얼, 시각 서보 노드, 결과 영상 뷰어(`/aruco/image`), RViz·Gazebo 시각화가 한 번에 실행됩니다.
+Gazebo 없이 RViz만: `use_gazebo:=false` / 시각화 없이: `use_rviz:=false`
 
 | 인자 | 기본값 | 설명 |
 | --- | --- | --- |

@@ -15,6 +15,7 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>marker_detection</exec_depend>
+  <exec_depend>twolink_gazebo</exec_depend>
   <exec_depend>realsense2_camera</exec_depend>
   <exec_depend>rqt_image_view</exec_depend>
 
