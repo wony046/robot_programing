@@ -19,7 +19,8 @@
       q1     = atan2(py, px) - atan2(r2 sin g, L1 + r2 cos g)
       q2     = g - b
     두 해(g = +-acos) 중 현재 자세에 가까운 해를 선택.
-    팔이 닿지 않는 거리면 r2 를 가능한 범위로 줄이거나 늘려 중앙 정렬을 우선한다.
+    D 로는 팔이 닿지 않거나 관절 한계를 넘으면, 한계 안에서 마커를 중앙에 두는
+    해 중 거리가 D 에 가장 가까운 해를 고른다 (중앙 정렬 우선).
 
 [3] 목표각으로 속도 제한을 두고 부드럽게 이동 -> des_value 발행
 
@@ -57,6 +58,13 @@ def camera_ik(p, D, L1, cx, cy, yaw, q_ref):
 
     반환: (q, D_actual, reachable)
     """
+    sols, D, reachable = camera_ik_all(p, D, L1, cx, cy, yaw, q_ref)
+    best = min(sols, key=lambda q: float(np.sum((q - q_ref) ** 2)))
+    return best, D, reachable
+
+
+def camera_ik_all(p, D, L1, cx, cy, yaw, q_ref):
+    """camera_ik 의 두 해(팔꿈치 +/-)를 모두 반환: ([q_a, q_b], D_actual, reachable)"""
     rho = float(np.hypot(p[0], p[1]))
     c = np.array([cx, cy])                       # link2 좌표계 카메라 위치
     u = np.array([math.cos(yaw), math.sin(yaw)])  # link2 좌표계 광축 방향
@@ -73,16 +81,37 @@ def camera_ik(p, D, L1, cx, cy, yaw, q_ref):
     b = math.atan2(v[1], v[0])
     cg = (rho * rho - L1 * L1 - r2 * r2) / (2.0 * L1 * r2)
     g0 = math.acos(max(-1.0, min(1.0, cg)))
-    best = None
+    sols = []
     for g in (g0, -g0):
         q1 = math.atan2(p[1], p[0]) - math.atan2(r2 * math.sin(g), L1 + r2 * math.cos(g))
         q2 = g - b
         # 현재 자세와 가장 가까운 동치각으로 (2pi 점프 방지)
-        q = np.array([q_ref[0] + wrap(q1 - q_ref[0]), q_ref[1] + wrap(q2 - q_ref[1])])
-        cost = float(np.sum((q - q_ref) ** 2))
-        if best is None or cost < best[1]:
-            best = (q, cost)
-    return best[0], D, reachable
+        sols.append(np.array([q_ref[0] + wrap(q1 - q_ref[0]), q_ref[1] + wrap(q2 - q_ref[1])]))
+    return sols, D, reachable
+
+
+def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim,
+                      d_min=0.12, d_max=0.80, d_step=0.01):
+    """관절 한계를 고려한 역기구학.
+
+    목표 거리 D 의 해가 관절 한계 밖이면, 마커를 영상 중앙에 두는 해 중에서
+    한계 안에 있고 거리가 D 에 가장 가까운 해를 고른다 (중앙 정렬 우선).
+    반환: (q, D_actual, ok)  ok=False 면 한계 안의 해가 없어 가장 가까운 해를 잘라서 반환
+    """
+    def inside(q):
+        return q1_lim[0] <= q[0] <= q1_lim[1] and q2_lim[0] <= q[1] <= q2_lim[1]
+
+    n = int(round((d_max - d_min) / d_step))
+    cands = sorted({D} | {d_min + i * d_step for i in range(n + 1)}, key=lambda d: abs(d - D))
+    for d in cands:
+        sols, d_act, reachable = camera_ik_all(p, d, L1, cx, cy, yaw, q_ref)
+        if not reachable:
+            continue
+        ok = [q for q in sols if inside(q)]
+        if ok:
+            return min(ok, key=lambda q: float(np.sum((q - q_ref) ** 2))), d_act, True
+    q, d_act, _ = camera_ik(p, D, L1, cx, cy, yaw, q_ref)
+    return np.array([np.clip(q[0], *q1_lim), np.clip(q[1], *q2_lim)]), d_act, False
 
 
 class VisualServoNode(Node):
@@ -91,10 +120,10 @@ class VisualServoNode(Node):
 
         p = self.declare_parameter
         self.desired_distance = p('desired_distance', 0.30).value   # [m]
-        self.max_joint_vel = p('max_joint_vel', 0.6).value  # [rad/s]
-        self.gain = p('gain', 3.0).value                    # 목표각 추종 게인 [1/s]
-        self.filter_alpha = p('filter_alpha', 0.3).value    # 마커 base 좌표 저역통과 (1: 필터 없음)
-        self.deadband = p('deadband', 0.01).value           # 목표각 오차 무시 범위 [rad]
+        self.max_joint_vel = p('max_joint_vel', 1.5).value  # [rad/s]
+        self.gain = p('gain', 6.0).value                    # 목표각 추종 게인 [1/s]
+        self.filter_alpha = p('filter_alpha', 0.5).value    # 마커 base 좌표 저역통과 (1: 필터 없음)
+        self.deadband = p('deadband', 0.008).value          # 목표각 오차 무시 범위 [rad]
         self.marker_timeout = p('marker_timeout', 0.3).value  # [s]
         self.state_timeout = p('state_timeout', 0.5).value    # [s]
         self.rate = p('rate', 20.0).value                   # [Hz]
@@ -176,11 +205,10 @@ class VisualServoNode(Node):
             self.tracking = True
 
         # [2] 역기구학으로 목표 관절각
-        q_goal, D, reachable = camera_ik(
+        q_goal, D, ok = camera_ik_limited(
             self.p_marker, self.desired_distance, self.L1,
-            self.cam_x, self.cam_y, self.cam_yaw, self.q_cmd)
-        q_goal[0] = np.clip(q_goal[0], *self.q1_lim)
-        q_goal[1] = np.clip(q_goal[1], *self.q2_lim)
+            self.cam_x, self.cam_y, self.cam_yaw, self.q_cmd, self.q1_lim, self.q2_lim)
+        reachable = ok and abs(D - self.desired_distance) < 1e-6
         self.q_goal = q_goal
 
         # [3] 속도 제한을 두고 목표각으로 이동
@@ -198,7 +226,7 @@ class VisualServoNode(Node):
         self.log_throttled(
             f'marker base=({self.p_marker[0]:+.3f},{self.p_marker[1]:+.3f}) '
             f'| IK goal q=({q_goal[0]:+.3f},{q_goal[1]:+.3f})'
-            f'{"" if reachable else f" [out of reach, D={D:.2f}]"} '
+            f'{"" if reachable else f" [target distance unreachable -> D={D:.2f}]"} '
             f'| q=({self.q[0]:+.3f},{self.q[1]:+.3f}) cmd=({self.q_cmd[0]:+.3f},{self.q_cmd[1]:+.3f})')
 
     def publish(self, q):

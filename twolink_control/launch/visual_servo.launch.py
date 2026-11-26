@@ -27,6 +27,9 @@ def generate_launch_description():
         DeclareLaunchArgument('dry_run', default_value='false',
                               description='true: 로봇에 명령을 보내지 않고 계산만'),
         DeclareLaunchArgument('use_camera', default_value='true'),
+        DeclareLaunchArgument('color_profile', default_value='960x540x60',
+                              description='RealSense 컬러 해상도x fps. 16:9(1920x1080/1280x720/960x540)는 '
+                                          '원래 화각(약 69도), 640x480 같은 4:3은 좌우가 잘려 좁아짐'),
         DeclareLaunchArgument('use_serial', default_value='true'),
         DeclareLaunchArgument('use_viewer', default_value='true'),
         DeclareLaunchArgument('use_rviz', default_value='true',
@@ -50,6 +53,12 @@ def generate_launch_description():
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(PathJoinSubstitution([
                 FindPackageShare('realsense2_camera'), 'launch', 'rs_launch.py'])),
+            launch_arguments={
+                'rgb_camera.color_profile': LaunchConfiguration('color_profile'),
+                'enable_depth': 'false',   # 마커로 거리를 추정하므로 depth 불필요 (USB/CPU 절약)
+                'enable_infra1': 'false',
+                'enable_infra2': 'false',
+            }.items(),
             condition=IfCondition(LaunchConfiguration('use_camera')),
         ),
         Node(
