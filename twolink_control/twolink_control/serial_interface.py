@@ -97,6 +97,11 @@ class SerialSubscriber(Node):
         self.last_board_diagnostic = None
         self.last_board_diagnostic_time = None
         self.board_diagnostics = self.declare_parameter('board_diagnostics', True).value
+        # 첫 상태를 받으면 ROS 명령이 없어도 현재 자세를 목표로 J 명령을 계속 보낸다.
+        # 펌웨어가 ROS 목표를 따르는 J 모드에 머물러 원위치 복귀 동작이 끼어들지 않게 한다.
+        self.hold_on_start = self.declare_parameter('hold_on_start', True).value
+        # 보드가 멈췄다가(비상정지/리셋) 다시 시작되면 그때 자세로 다시 고정
+        self.rehold_pending = False
         # Probe D first: updated firmware can report why a stopped board is
         # not answering R. Older firmware falls back to R after its first reply.
         self.next_diagnostic_time = 0.0
@@ -277,6 +282,8 @@ class SerialSubscriber(Node):
                 else:
                     self.last_board_diagnostic = diagnostic
                     self.last_board_diagnostic_time = time.monotonic()
+                    if not diagnostic['running']:
+                        self.rehold_pending = True
                 self.pending_request = None
             if diagnostic is None:
                 self.get_logger().warning(
@@ -374,6 +381,17 @@ class SerialSubscriber(Node):
             return
 
         x, y, xv, yv, q1, q2, q1v, q2v = state
+
+        with self.state_lock:
+            rehold = self.rehold_pending
+            self.rehold_pending = False
+        if self.hold_on_start and (not self.command_received or rehold):
+            # 현재 자세를 목표로 고정 -> 다음 전송부터 J 명령 (원위치 복귀 방지)
+            self.xdes, self.ydes, self.q1des, self.q2des = x, y, q1, q2
+            self.command_received = True
+            self.get_logger().info(
+                f'Holding current pose q1={q1:.4f}, q2={q2:.4f} '
+                + ('(board restarted)' if rehold else '(no command yet)'))
 
         self.get_logger().debug(
             f"x={x:.4f}, y={y:.4f}, xv={xv:.4f}, yv={yv:.4f}, "

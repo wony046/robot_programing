@@ -238,9 +238,9 @@ class VisualServoNode(Node):
         if not marker_ok:
             if self.tracking:
                 self.stop_now('Marker timeout')
-            if self.commanded:
-                # 정지 위치를 계속 유지
-                self.publish(self.q_cmd)
+            # 정지 명령은 stop_now() 에서 한 번만 보낸다. serial_node 가 마지막 목표를
+            # 계속 반복 전송하므로 여기서 다시 보내지 않는다 (보드 리셋 후 예전 자세로
+            # 끌려가지 않게).
             self.log_throttled('Waiting for marker...')
             return
         if not self.tracking:

@@ -30,6 +30,8 @@ def make_bridge():
         next_diagnostic_time=float('inf'), last_board_diagnostic=None,
         last_board_diagnostic_time=None,
         pub_robot_state=Mock(), get_logger=lambda: logger)
+    bridge.hold_on_start = False
+    bridge.rehold_pending = False
     bridge.connected = threading.Event()
     bridge.connected.set()
     for name in ('build_packet', 'parse_packet', 'listener_callback',
@@ -257,3 +259,50 @@ def test_stopped_board_remains_observable_before_first_state():
 ])
 def test_reject_invalid_diagnostic_records(packet):
     assert serial_interface.decode_board_diagnostics(packet) is None
+
+
+def _state_packet(q1, q2):
+    return struct.pack('<8f', 0.1, 0.2, 0.0, 0.0, q1, q2, 0.0, 0.0)
+
+
+def test_hold_on_start_sends_current_pose_before_any_command():
+    bridge = make_bridge()
+    bridge.hold_on_start = True
+    bridge.ser = Mock()
+    bridge.tx_and_publish()
+    assert bridge.ser.write.call_args.args == (b'R',)   # no state yet -> only request
+    bridge.handle_response(_state_packet(0.3, 1.4))
+    bridge.tx_and_publish()                              # first state -> hold it
+    assert bridge.command_received
+    bridge.handle_response(_state_packet(0.3, 1.4))      # reply to outstanding R
+    bridge.tx_and_publish()
+    packet = bridge.ser.write.call_args.args[0]
+    assert packet[:1] == b'J'
+    values = struct.unpack('<8f', packet[1:33])
+    assert values[4:6] == pytest.approx((0.3, 1.4))
+
+
+def test_hold_does_not_override_ros_command():
+    bridge = make_bridge()
+    bridge.hold_on_start = True
+    bridge.listener_callback(SimpleNamespace(xdes=0.0, ydes=0.0, q1des=-0.5, q2des=0.7))
+    bridge.ser = Mock()
+    bridge.tx_and_publish()
+    bridge.handle_response(_state_packet(0.3, 1.4))
+    bridge.tx_and_publish()
+    assert (bridge.q1des, bridge.q2des) == (-0.5, 0.7)
+
+
+def test_board_restart_reholds_current_pose():
+    bridge = make_bridge()
+    bridge.hold_on_start = True
+    bridge.listener_callback(SimpleNamespace(xdes=0.0, ydes=0.0, q1des=-0.5, q2des=0.7))
+    bridge.pending_request = b'D'
+    stopped = struct.pack('<8f', 12345, ord('C'), 0, 0, 0, 0, 65535 << 8, 65535 << 8)
+    bridge.handle_response(stopped)                      # board stopped / reset
+    bridge.ser = Mock()
+    bridge.tx_and_publish()
+    bridge.pending_request = b'R'
+    bridge.handle_response(_state_packet(0.0, 1.5708))   # running again (home pose)
+    bridge.tx_and_publish()
+    assert (bridge.q1des, bridge.q2des) == pytest.approx((0.0, 1.5708))
