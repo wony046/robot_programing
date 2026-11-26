@@ -100,7 +100,7 @@ Gazebo 없이 RViz만: `use_gazebo:=false` / 시각화 없이: `use_rviz:=false`
 - 마커 인식에 실패하면 그 프레임에서 즉시 정지합니다 (`/aruco/detected`, `lost_frames` 기본 1). 팔이 닿지 않는 위치에서는 중앙 정렬을 우선합니다.
 - 관절 제한은 기본으로 없습니다. 보드가 ±π 로 잘라 보고하는 관절각을 이어 붙여 연속 각도로 추적하고, 목표각도 연속 각도로 보내 ±π 에서 표현이 뒤집히지 않게 합니다. ±π 를 넘을 때 로봇이 떨면 `angle_limit:=3.0` 으로 경계를 막을 수 있습니다.
 - 회전 제한 없음 (기본). 접힌 자세에서 떨면 `singularity_margin:=0.3`, 범위 제한은 `use_joint_limits:=true` + `q1_min/q1_max/q2_min/q2_max`.
-- 카메라 장착 위치(`camera_offset_x/y`, `camera_yaw`), 게인(`gain`, 기본 6), 속도 제한(`max_joint_vel`, 기본 1.5 rad/s)은 `visual_servo_node` 파라미터로 조정합니다.
+- 카메라 장착 위치(`camera_offset_x/y`, `camera_yaw`), 게인(`gain`, 기본 10), 속도 제한(`max_joint_vel`, 기본 3.0 rad/s), 선행량(`max_lead`, 기본 0.8 rad)은 실행 중 `ros2 param set /visual_servo <이름> <값>` 으로 바로 바꿀 수 있고, `visual_servo_node` 파라미터로 조정합니다.
 
 ### 5. 마커 인식만 실행
 ```bash

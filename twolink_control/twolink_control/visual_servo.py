@@ -40,6 +40,7 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import SetParametersResult
 from geometry_msgs.msg import Pose, Point
 from std_msgs.msg import Bool
 from visualization_msgs.msg import Marker, MarkerArray
@@ -160,15 +161,15 @@ class VisualServoNode(Node):
 
         p = self.declare_parameter
         self.desired_distance = p('desired_distance', 0.30).value   # [m]
-        self.max_joint_vel = p('max_joint_vel', 2.0).value  # [rad/s]
-        self.gain = p('gain', 6.0).value                    # 목표각 추종 게인 [1/s]
+        self.max_joint_vel = p('max_joint_vel', 3.0).value  # [rad/s]
+        self.gain = p('gain', 10.0).value                   # 목표각 추종 게인 [1/s]
         # 마커 추정 필터 (1: 필터 없음). 방향(좌우)은 픽셀 기반이라 정확 -> 빠르게 반영,
         # 거리는 PnP 추정이라 노이즈가 큼 -> 강하게 평활 (방향 1순위, 거리 2순위)
         self.filter_dir = p('filter_direction', 0.7).value
         self.filter_dist = p('filter_distance', 0.25).value
         # 거리 목표를 현재 거리 -> desired_distance 로 옮기는 속도 [m/s].
         # IK 해는 매 순간 마커를 세로선 위에 두므로 방향이 먼저 맞고 거리는 뒤따른다.
-        self.distance_rate = p('distance_rate', 0.25).value
+        self.distance_rate = p('distance_rate', 0.4).value
         # 역기구학 두 해 중 사용할 해: 'positive'(초기 자세 q2=+90도 쪽), 'negative', 'nearest'
         elbow = str(p('elbow', 'positive').value).lower()
         self.branch = {'positive': 1, 'negative': -1}.get(elbow, 0)
@@ -181,7 +182,7 @@ class VisualServoNode(Node):
         self.marker_timeout = p('marker_timeout', 0.5).value  # [s]
         # 목표각이 실제 관절각보다 앞설 수 있는 최대값 [rad].
         # 작을수록 정지 명령 후 로봇이 덜 미끄러지고, 클수록 빠르게 움직인다.
-        self.max_lead = p('max_lead', 0.4).value
+        self.max_lead = p('max_lead', 0.8).value
         self.state_timeout = p('state_timeout', 0.5).value    # [s]
         self.rate = p('rate', 20.0).value                   # [Hz]
         # 관절 제한 (기본: 없음). use_joint_limits:=true 면 아래 범위 적용
@@ -230,10 +231,27 @@ class VisualServoNode(Node):
         self.viz_pub = self.create_publisher(MarkerArray, '/visual_servo/markers', 10)
         self.dt = 1.0 / self.rate
         self.create_timer(self.dt, self.control_loop)
+        # 실행 중 'ros2 param set /visual_servo <이름> <값>' 으로 바로 조정 가능한 값
+        self.live_params = {
+            'desired_distance': 'desired_distance', 'max_joint_vel': 'max_joint_vel',
+            'gain': 'gain', 'max_lead': 'max_lead', 'distance_rate': 'distance_rate',
+            'filter_direction': 'filter_dir', 'filter_distance': 'filter_dist',
+            'deadband': 'deadband', 'lost_frames': 'lost_frames',
+            'marker_timeout': 'marker_timeout', 'singularity_margin': 'sing_margin',
+        }
+        self.add_on_set_parameters_callback(self.on_param_change)
 
         self.get_logger().info(
             f'Visual servo (IK) start: distance={self.desired_distance:.2f} m'
             + (' [DRY RUN - no commands sent]' if self.dry_run else ''))
+
+    def on_param_change(self, params):
+        for prm in params:
+            attr = self.live_params.get(prm.name)
+            if attr is not None:
+                setattr(self, attr, prm.value)
+                self.get_logger().info(f'param {prm.name} = {prm.value}')
+        return SetParametersResult(successful=True)
 
     # ---------------- 콜백 ----------------
     def state_callback(self, msg):
