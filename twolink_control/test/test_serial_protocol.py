@@ -30,6 +30,8 @@ def make_bridge():
         next_diagnostic_time=float('inf'), last_board_diagnostic=None,
         last_board_diagnostic_time=None,
         pub_robot_state=Mock(), get_logger=lambda: logger)
+    bridge.connected = threading.Event()
+    bridge.connected.set()
     for name in ('build_packet', 'parse_packet', 'listener_callback',
                  'rx_loop', 'handle_response', 'tx_and_publish', 'report_serial_status'):
         setattr(bridge, name, MethodType(

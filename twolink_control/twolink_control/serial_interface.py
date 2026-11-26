@@ -5,9 +5,31 @@ from rclpy.node import Node
 from twolink_msgs.msg import XYpos, CMD
 import serial
 import struct
+import glob
+import os
 import sys
 import threading
 import time
+
+
+# 로봇 아두이노(UNO R4 Minima) 포트 후보. /dev/twolink 는 udev 규칙(99-twolink.rules)이 만드는 고정 이름.
+PORT_CANDIDATES = (
+    '/dev/twolink',
+    '/dev/serial/by-id/*Arduino*',
+    '/dev/ttyACM*',
+    '/dev/ttyUSB*',
+)
+
+
+def find_serial_port(requested='auto'):
+    """requested 가 'auto' 이거나 존재하지 않으면 아두이노 포트를 자동으로 찾는다."""
+    if requested and requested != 'auto' and os.path.exists(requested):
+        return requested
+    for pattern in PORT_CANDIDATES:
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            return os.path.realpath(matches[0]) if pattern != '/dev/twolink' else matches[0]
+    return None
 
 
 def decode_board_diagnostics(data):
@@ -81,18 +103,20 @@ class SerialSubscriber(Node):
 
         # 34-byte command/request + 32-byte response fit within 9600 baud at 10 Hz.
         pub_period = 0.1
-        port = self.declare_parameter('port', '/dev/ttyACM0').value
-        baudrate = self.declare_parameter('baudrate', 9600).value
+        # 'auto': /dev/twolink -> /dev/serial/by-id/*Arduino* -> /dev/ttyACM* 순서로 탐색
+        self.port_param = self.declare_parameter('port', 'auto').value
+        self.baudrate = self.declare_parameter('baudrate', 9600).value
+        self.ser = None
+        self.ser_lock = threading.Lock()
+        self.connected = threading.Event()
 
-        try:
-            self.ser = serial.Serial(port, baudrate, timeout=0.01, write_timeout=0.2)
-            # Let an old partial command expire (firmware timeout: 100 ms), then
-            # discard pending replies before requesting fresh, headerless frames.
-            time.sleep(0.15)
-            self.ser.reset_input_buffer()
-        except serial.SerialException as e:
-            self.get_logger().error(f"Failed to connect to serial port: {e}")
+        port = self.open_serial()
+        if port is None:
+            self.get_logger().error(
+                f"Failed to connect to serial port (port={self.port_param}). "
+                "Check USB cable, robot power and 'ls /dev/ttyACM*'.")
             sys.exit(1)
+        baudrate = self.baudrate
 
         # RX 스레드 시작
         self.rx_thread = threading.Thread(target=self.rx_loop, daemon=True)
@@ -104,6 +128,47 @@ class SerialSubscriber(Node):
         self.get_logger().info(
             f'Serial connected: {port}, {baudrate} baud; '
             'joint command J + 8 float32, state request R, diagnostics D, response 32 bytes')
+
+    def open_serial(self):
+        """아두이노 포트를 찾아 연다. 성공하면 포트 경로, 실패하면 None."""
+        port = find_serial_port(self.port_param)
+        if port is None:
+            return None
+        if self.port_param not in ('auto', port):
+            self.get_logger().warning(f'{self.port_param} not found -> using {port}')
+        try:
+            ser = serial.Serial(port, self.baudrate, timeout=0.01, write_timeout=0.2)
+            # Let an old partial command expire (firmware timeout: 100 ms), then
+            # discard pending replies before requesting fresh, headerless frames.
+            time.sleep(0.15)
+            ser.reset_input_buffer()
+        except (serial.SerialException, OSError) as e:
+            self.get_logger().warning(f'Failed to open {port}: {e}')
+            return None
+        with self.ser_lock:
+            self.ser = ser
+        with self.state_lock:
+            self.pending_request = None
+        self.connected.set()
+        return port
+
+    def reconnect(self):
+        """USB 가 끊기거나 포트 번호가 바뀌면 다시 찾아서 연결한다."""
+        self.connected.clear()
+        with self.ser_lock:
+            try:
+                if self.ser:
+                    self.ser.close()
+            except Exception:
+                pass
+        self.get_logger().warning('Serial disconnected -> reconnecting...')
+        while rclpy.ok() and not self.stop_event.is_set():
+            port = self.open_serial()
+            if port is not None:
+                self.get_logger().info(f'Serial reconnected: {port}')
+                return True
+            self.stop_event.wait(1.0)
+        return False
 
     def report_serial_status(self):
         with self.state_lock:
@@ -241,6 +306,8 @@ class SerialSubscriber(Node):
                 # No busy loop while idle; read one byte with the serial timeout.
                 n = self.ser.in_waiting
                 chunk = self.ser.read(max(1, n))
+                if not chunk and not os.path.exists(self.ser.port):
+                    raise serial.SerialException(f'{self.ser.port} disappeared')
                 if chunk:
                     with self.state_lock:
                         self.rx_bytes += len(chunk)
@@ -259,10 +326,16 @@ class SerialSubscriber(Node):
                 if self.stop_event.is_set():
                     break
                 self.get_logger().error(f"RX loop error: {e}")
-                self.stop_event.wait(0.1)
+                if isinstance(e, (serial.SerialException, OSError)):
+                    buf.clear()
+                    self.reconnect()
+                else:
+                    self.stop_event.wait(0.1)
 
     # ---------------- TX + Publish ----------------
     def tx_and_publish(self):
+        if not self.connected.is_set():
+            return  # 재연결 중
         # 1) Complete each reply before issuing a different request type.
         request = None
         now = time.monotonic()

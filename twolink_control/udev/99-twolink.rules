@@ -1,0 +1,4 @@
+# twolink 로봇 아두이노 (Arduino UNO R4 Minima, USB 2341:0069)
+# 꽂힐 때마다 ttyACM 번호가 바뀌어도 항상 /dev/twolink 로 접근할 수 있게 한다.
+# MODE 0666: dialout 그룹 없이도 접근 가능
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="0069", SYMLINK+="twolink", MODE="0666"

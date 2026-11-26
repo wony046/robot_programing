@@ -1,7 +1,7 @@
 """마커 추종 전체 실행: RealSense + 마커 인식 + 시리얼 + 시각 서보
                      + 결과 영상 뷰어 + RViz/Gazebo 시각화
 
-ros2 launch twolink_control visual_servo.launch.py port:=/dev/ttyACM0 distance:=0.30
+ros2 launch twolink_control visual_servo.launch.py distance:=0.30
 """
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
@@ -18,7 +18,8 @@ def generate_launch_description():
     dry_run = LaunchConfiguration('dry_run')
 
     return LaunchDescription([
-        DeclareLaunchArgument('port', default_value='/dev/ttyACM0'),
+        DeclareLaunchArgument('port', default_value='auto',
+                              description='auto: /dev/twolink -> Arduino 자동 탐지'),
         DeclareLaunchArgument('distance', default_value='0.30',
                               description='마커와 유지할 거리 [m]'),
         DeclareLaunchArgument('target_id', default_value='-1',

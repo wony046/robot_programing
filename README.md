@@ -35,6 +35,9 @@ rosdep install --from-paths src --ignore-src --rosdistro humble -r -y
 # 빌드
 colcon build --symlink-install
 source install/setup.bash
+
+# (권장) 로봇 아두이노를 항상 /dev/twolink 로 고정 + 권한 설정
+bash src/robot_programing/twolink_control/udev/install_udev.sh
 ```
 
 새 터미널마다 `source ~/ros2_ws/install/setup.bash` 가 필요합니다.
@@ -55,11 +58,12 @@ ros2 run joint_state_publisher_gui joint_state_publisher_gui   # 다른 터미�
 각 명령은 별도 터미널에서 실행합니다.
 ```bash
 ros2 launch twolink_gazebo gazebo.launch.py
-ros2 run twolink_control serial_node --ros-args -p port:=/dev/ttyACM0
+ros2 run twolink_control serial_node
 ros2 run twolink_gazebo joint_publisher.py
 ```
-- 포트는 `ls /dev/ttyACM*` 로 확인 (USB 를 다시 꽂으면 번호가 바뀔 수 있음)
-- 권한 오류 시: `sudo usermod -aG dialout $USER` 후 재로그인
+- 포트는 자동으로 찾습니다 (`/dev/twolink` → Arduino → `/dev/ttyACM*`). 직접 지정: `--ros-args -p port:=/dev/ttyACM0`
+- 실행 중 USB 가 다시 연결되어 포트 번호가 바뀌어도 자동으로 재연결합니다.
+- 권한 오류 시: udev 규칙 설치(위) 또는 `sudo usermod -aG dialout $USER` 후 재로그인
 - 로봇 컨트롤 박스의 초록 시작 버튼을 눌러야 상태가 전송됩니다
 
 실제 로봇 없이 테스트하려면 `serial_node` 대신:
@@ -69,21 +73,21 @@ ros2 run twolink_gazebo dummy_data_publisher.py
 
 ### 3. 키보드로 로봇 제어
 ```bash
-ros2 run twolink_control serial_node --ros-args -p port:=/dev/ttyACM0
+ros2 run twolink_control serial_node
 ros2 run twolink_control command_node      # e/d: 관절1 +/-, r/f: 관절2 +/-
 ```
 
 ### 4. 마커 추종 (Visual Servoing)
 마커를 카메라 영상 좌우 중앙에 두고, 마커와 일정 거리를 유지하도록 로봇을 움직입니다.
 ```bash
-ros2 launch twolink_control visual_servo.launch.py port:=/dev/ttyACM0 distance:=0.30
+ros2 launch twolink_control visual_servo.launch.py distance:=0.30
 ```
 RealSense, 마커 인식, 시리얼, 시각 서보 노드, 결과 영상 뷰어(`/aruco/image`), RViz·Gazebo 시각화가 한 번에 실행됩니다.
 Gazebo 없이 RViz만: `use_gazebo:=false` / 시각화 없이: `use_rviz:=false`
 
 | 인자 | 기본값 | 설명 |
 | --- | --- | --- |
-| `port` | `/dev/ttyACM0` | 로봇 시리얼 포트 |
+| `port` | `auto` | 로봇 시리얼 포트 (auto: 자동 탐지) |
 | `distance` | `0.30` | 유지할 마커 거리 [m] |
 | `target_id` | `-1` | 추종할 마커 ID (-1: 가장 크게 보이는 마커) |
 | `dry_run` | `false` | `true`면 로봇에 명령을 보내지 않고 계산만 (처음 방향 확인용) |
