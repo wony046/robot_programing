@@ -1,3 +1,6 @@
+import os
+from glob import glob
+
 from setuptools import find_packages, setup
 
 package_name = 'twolink_control'
@@ -10,6 +13,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -22,6 +26,7 @@ setup(
         'console_scripts': [
             'command_node = twolink_control.keyboard_command:main', 
             'serial_node = twolink_control.serial_interface:main', 
+            'visual_servo_node = twolink_control.visual_servo:main',
         ],
     },
 )

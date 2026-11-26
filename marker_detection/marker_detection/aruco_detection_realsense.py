@@ -22,6 +22,10 @@ class ArucoDetectorNode_Realsense(Node):
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_50)
         self.aruco_params = cv2.aruco.DetectorParameters_create()
         self.marker_length = 0.06 # m
+        # 추종할 마커 ID (-1이면 가장 크게 보이는 마커)
+        self.target_id = self.declare_parameter('target_id', -1).value
+        # 시각화용 목표 거리 (visual_servo의 desired_distance와 맞춤)
+        self.desired_distance = self.declare_parameter('desired_distance', 0.30).value
 
         # Subscriber
         self.image_sub = self.create_subscription(
@@ -66,16 +70,34 @@ class ArucoDetectorNode_Realsense(Node):
             parameters=self.aruco_params
         )
 
+        h, w = frame.shape[:2]
+        # 영상 중앙 십자선 (목표 위치)
+        cv2.line(frame, (w // 2 - 20, h // 2), (w // 2 + 20, h // 2), (0, 255, 255), 2)
+        cv2.line(frame, (w // 2, h // 2 - 20), (w // 2, h // 2 + 20), (0, 255, 255), 2)
+
+        result = None
         if ids is not None and len(ids) > 0: # 마커 검출에 성공했다면?
             # 마커 3차원 위치 추정
-            rvec, tvec, quaternion = self.my_estimatePoseSingleMarkers(corners, ids)
+            result = self.my_estimatePoseSingleMarkers(corners, ids)
+
+        if result is not None:
+            rvec, tvec, quaternion, idx = result
 
              # 마커 그리기
             cv2.aruco.drawDetectedMarkers(frame, corners, ids)
             # 좌표축 그리기 (x: 빨강, y: 초록, z: 파랑)
             cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs, rvec, tvec, self.marker_length * 0.5)
 
-            tvec = tvec.flatten()       
+            tvec = tvec.flatten()
+
+            # 마커 중심 -> 영상 중앙 오차 표시
+            c = corners[idx][0].mean(axis=0).astype(int)
+            cv2.line(frame, (w // 2, h // 2), (int(c[0]), int(c[1])), (0, 0, 255), 2)
+            cv2.circle(frame, (int(c[0]), int(c[1])), 5, (0, 0, 255), -1)
+            cv2.putText(frame, f'ID {int(ids[idx][0])}  X {tvec[0]*100:+.1f} cm  Y {tvec[1]*100:+.1f} cm',
+                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.putText(frame, f'Dist {tvec[2]*100:.1f} cm  (target {self.desired_distance*100:.0f} cm)',
+                        (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             # 결과 Publish
             pose_msg = Pose()
@@ -88,7 +110,11 @@ class ArucoDetectorNode_Realsense(Node):
             pose_msg.orientation.w = quaternion[3]
             self.pose_pub.publish(pose_msg)
 
-            self.get_logger().info(f'{pose_msg.position}, {pose_msg.orientation}')
+            self.get_logger().info(
+                f'marker x={tvec[0]:+.3f} y={tvec[1]:+.3f} z={tvec[2]:.3f}',
+                throttle_duration_sec=0.5)
+        else:
+            cv2.putText(frame, 'No marker', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         # OpenCV -> ROS Image
         out_msg = self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
@@ -105,18 +131,26 @@ class ArucoDetectorNode_Realsense(Node):
             [-self.marker_length / 2, -self.marker_length / 2, 0]   # 좌하단 좌표
         ], dtype=np.float32)
 
-        if ids is not None:
-            for i in range(len(ids)):
-                corner = corners[i][0]
+        if ids is None:
+            return None
 
-                # solvePnP를 사용하여 3차원 위치 추정
-                success, rvec, tvec = cv2.solvePnP(object_points, corner, self.camera_matrix , self.dist_coeffs)
+        # 추종 대상 선택: target_id가 지정되면 그 마커, 아니면 가장 크게 보이는(가까운) 마커
+        candidates = [i for i in range(len(ids))
+                      if self.target_id < 0 or int(ids[i][0]) == self.target_id]
+        candidates.sort(key=lambda i: -cv2.contourArea(corners[i][0].astype(np.float32)))
 
-                R = Rotation.from_rotvec(rvec.flatten())
-                quaternion = R.as_quat() # xyzw
+        for i in candidates:
+            corner = corners[i][0]
 
-                if success:
-                    return rvec, tvec, quaternion
+            # solvePnP를 사용하여 3차원 위치 추정
+            success, rvec, tvec = cv2.solvePnP(
+                object_points, corner, self.camera_matrix, self.dist_coeffs,
+                flags=cv2.SOLVEPNP_IPPE_SQUARE)
+
+            if success and tvec[2, 0] > 0:
+                quaternion = Rotation.from_rotvec(rvec.flatten()).as_quat() # xyzw
+                return rvec, tvec, quaternion, i
+        return None
 
 def main(args=None):
     rclpy.init(args=args)

@@ -73,7 +73,25 @@ ros2 run twolink_control serial_node --ros-args -p port:=/dev/ttyACM0
 ros2 run twolink_control command_node      # e/d: 관절1 +/-, r/f: 관절2 +/-
 ```
 
-### 4. 마커 인식
+### 4. 마커 추종 (Visual Servoing)
+마커를 카메라 영상 좌우 중앙에 두고, 마커와 일정 거리를 유지하도록 로봇을 움직입니다.
+```bash
+ros2 launch twolink_control visual_servo.launch.py port:=/dev/ttyACM0 distance:=0.30
+```
+RealSense, 마커 인식, 시리얼, 시각 서보 노드와 결과 영상 뷰어(`/aruco/image`)가 한 번에 실행됩니다.
+
+| 인자 | 기본값 | 설명 |
+| --- | --- | --- |
+| `port` | `/dev/ttyACM0` | 로봇 시리얼 포트 |
+| `distance` | `0.30` | 유지할 마커 거리 [m] |
+| `target_id` | `-1` | 추종할 마커 ID (-1: 가장 크게 보이는 마커) |
+| `dry_run` | `false` | `true`면 로봇에 명령을 보내지 않고 계산만 (처음 방향 확인용) |
+
+- 관절이 수평 회전 2개뿐이라 좌우 중앙 정렬과 거리 유지만 제어합니다. 상하 정렬은 하지 않습니다.
+- 마커를 놓치면 그 자리에 정지합니다. 팔이 닿지 않는 위치에서는 중앙 정렬을 우선합니다.
+- 카메라 장착 위치(`camera_offset_x/y`, `camera_yaw`), 게인, 속도 제한은 `visual_servo_node` 파라미터로 조정합니다.
+
+### 5. 마커 인식만 실행
 ```bash
 ros2 launch realsense2_camera rs_launch.py
 ros2 run marker_detection detection_realsense
