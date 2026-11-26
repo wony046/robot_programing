@@ -127,8 +127,13 @@ class VisualServoNode(Node):
         self.deadband = p('deadband', 0.008).value          # 목표각 오차 무시 범위 [rad]
         # 마커 인식 실패 프레임이 lost_frames 개 연속이면 즉시 정지 (1: 한 프레임만 놓쳐도 정지)
         self.lost_frames = p('lost_frames', 1).value
-        # /aruco/detected 가 끊긴 경우(인식 노드 정지 등)의 안전 타임아웃
-        self.marker_timeout = p('marker_timeout', 0.15).value  # [s]
+        # /aruco/detected 자체가 끊긴 경우(인식 노드 정지 등)의 안전 타임아웃.
+        # 화면에 마커가 없을 때는 detected=False 로 즉시 정지하므로, 이 값은 인식 노드가
+        # 잠깐 밀릴 때 불필요하게 멈추지 않도록 여유 있게 둔다.
+        self.marker_timeout = p('marker_timeout', 0.5).value  # [s]
+        # 목표각이 실제 관절각보다 앞설 수 있는 최대값 [rad].
+        # 작을수록 정지 명령 후 로봇이 덜 미끄러지고, 클수록 빠르게 움직인다.
+        self.max_lead = p('max_lead', 0.15).value
         self.state_timeout = p('state_timeout', 0.5).value    # [s]
         self.rate = p('rate', 20.0).value                   # [Hz]
         # 관절 회전 제한 (기본: 사용 안 함). use_joint_limits:=true 면 아래 범위 적용
@@ -257,7 +262,12 @@ class VisualServoNode(Node):
         peak = np.max(np.abs(q_dot))
         if peak > self.max_joint_vel:
             q_dot *= self.max_joint_vel / peak
-        self.q_cmd = self.q_cmd + q_dot * self.dt
+        q_new = self.q_cmd + q_dot * self.dt
+        # 실제 위치보다 max_lead 이상 앞서지 않게 (정지 시 미끄러짐 감소).
+        # 보드는 관절각을 (-pi, pi] 로 보고하므로 차이는 wrap 해서 계산한다.
+        q_est = self.estimate_q()
+        lead = np.array([wrap(q_new[0] - q_est[0]), wrap(q_new[1] - q_est[1])])
+        self.q_cmd = q_est + np.clip(lead, -self.max_lead, self.max_lead)
 
         self.publish(self.q_cmd)
         self.commanded = True

@@ -1,5 +1,6 @@
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy
 
 from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import Pose
@@ -29,11 +30,14 @@ class ArucoDetectorNode_Realsense(Node):
         self.desired_distance = self.declare_parameter('desired_distance', 0.30).value
 
         # Subscriber
+        # 항상 최신 프레임 1장만 처리 (처리가 밀려도 오래된 프레임이 쌓이지 않게)
+        latest_only = QoSProfile(depth=1, history=HistoryPolicy.KEEP_LAST,
+                                 reliability=ReliabilityPolicy.BEST_EFFORT)
         self.image_sub = self.create_subscription(
             Image,
             '/camera/camera/color/image_raw',
             self.image_callback,
-            10
+            latest_only
         )
         self.cam_info_sub = self.create_subscription(
             CameraInfo,
