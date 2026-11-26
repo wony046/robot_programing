@@ -127,8 +127,14 @@ class VisualServoNode(Node):
         self.marker_timeout = p('marker_timeout', 0.3).value  # [s]
         self.state_timeout = p('state_timeout', 0.5).value    # [s]
         self.rate = p('rate', 20.0).value                   # [Hz]
-        self.q1_lim = (p('q1_min', -1.57).value, p('q1_max', 1.57).value)
-        self.q2_lim = (p('q2_min', -2.4).value, p('q2_max', 2.4).value)
+        # 관절 회전 제한 (기본: 사용 안 함). use_joint_limits:=true 면 아래 범위 적용
+        self.use_joint_limits = p('use_joint_limits', False).value
+        if self.use_joint_limits:
+            self.q1_lim = (p('q1_min', -1.57).value, p('q1_max', 1.57).value)
+            self.q2_lim = (p('q2_min', -2.4).value, p('q2_max', 2.4).value)
+        else:
+            self.q1_lim = (-math.inf, math.inf)
+            self.q2_lim = (-math.inf, math.inf)
         # 로봇 / 카메라 장착 기하 (link2 좌표계 기준)
         self.L1 = p('link1_length', 0.143).value
         self.cam_x = p('camera_offset_x', 0.06).value

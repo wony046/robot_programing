@@ -98,6 +98,7 @@ Gazebo 없이 RViz만: `use_gazebo:=false` / 시각화 없이: `use_rviz:=false`
   RViz 에 마커 위치(파랑), 목표 카메라 위치(초록), 목표 시선(노랑)이 표시됩니다.
 - 관절이 수평 회전 2개뿐이라 좌우 중앙 정렬과 거리 유지만 제어합니다. 상하 정렬은 하지 않습니다.
 - 마커를 놓치면 그 자리에 정지합니다. 팔이 닿지 않는 위치에서는 중앙 정렬을 우선합니다.
+- 관절 회전 제한은 기본으로 꺼져 있습니다. 켜려면 `use_joint_limits:=true` (q1 ±1.57, q2 ±2.4 rad, `q1_min/q1_max/q2_min/q2_max` 로 조정).
 - 카메라 장착 위치(`camera_offset_x/y`, `camera_yaw`), 게인(`gain`, 기본 6), 속도 제한(`max_joint_vel`, 기본 1.5 rad/s)은 `visual_servo_node` 파라미터로 조정합니다.
 
 ### 5. 마커 인식만 실행
