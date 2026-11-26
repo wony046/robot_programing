@@ -78,9 +78,12 @@ class ArucoDetectorNode_Realsense(Node):
         )
 
         h, w = frame.shape[:2]
-        # 영상 중앙 십자선 (목표 위치)
-        cv2.line(frame, (w // 2 - 20, h // 2), (w // 2 + 20, h // 2), (0, 255, 255), 2)
-        cv2.line(frame, (w // 2, h // 2 - 20), (w // 2, h // 2 + 20), (0, 255, 255), 2)
+        # 기준 세로선: 영상 정중앙(광학 중심 cx). 로봇은 높이를 못 바꾸므로
+        # 마커의 상하 위치는 무시하고 이 선과의 좌우 거리만 제어에 쓴다.
+        fx = self.camera_matrix[0, 0]
+        cx = self.camera_matrix[0, 2]
+        line_x = int(round(cx))
+        cv2.line(frame, (line_x, 0), (line_x, h - 1), (0, 255, 255), 2)
 
         result = None
         if ids is not None and len(ids) > 0: # 마커 검출에 성공했다면?
@@ -97,18 +100,27 @@ class ArucoDetectorNode_Realsense(Node):
 
             tvec = tvec.flatten()
 
-            # 마커 중심 -> 영상 중앙 오차 표시
-            c = corners[idx][0].mean(axis=0).astype(int)
-            cv2.line(frame, (w // 2, h // 2), (int(c[0]), int(c[1])), (0, 0, 255), 2)
-            cv2.circle(frame, (int(c[0]), int(c[1])), 5, (0, 0, 255), -1)
-            cv2.putText(frame, f'ID {int(ids[idx][0])}  X {tvec[0]*100:+.1f} cm  Y {tvec[1]*100:+.1f} cm',
+            # 마커 중심 (렌즈 왜곡 보정한 픽셀 좌표)
+            c_px = corners[idx][0].mean(axis=0)
+            c_und = cv2.undistortPoints(c_px.reshape(1, 1, 2).astype(np.float64),
+                                        self.camera_matrix, self.dist_coeffs,
+                                        P=self.camera_matrix).reshape(2)
+            # 세로선과의 좌우 거리: 픽셀 -> 마커 거리(Z)에서의 실제 거리 [m]
+            dx_px = float(c_und[0] - cx)
+            lateral = tvec[2] * dx_px / fx
+
+            # 마커 중심 -> 세로선까지 수평 오차 표시 (상하는 무시)
+            u, v = int(c_px[0]), int(c_px[1])
+            cv2.line(frame, (line_x, v), (u, v), (0, 0, 255), 3)
+            cv2.circle(frame, (u, v), 5, (0, 0, 255), -1)
+            cv2.putText(frame, f'ID {int(ids[idx][0])}  L/R {lateral*100:+.1f} cm ({dx_px:+.0f} px)',
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
             cv2.putText(frame, f'Dist {tvec[2]*100:.1f} cm  (target {self.desired_distance*100:.0f} cm)',
                         (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
             # 결과 Publish
             pose_msg = Pose()
-            pose_msg.position.x = tvec[0]
+            pose_msg.position.x = lateral    # 세로선 기준 좌우 거리 [m]
             pose_msg.position.y = tvec[1]
             pose_msg.position.z = tvec[2]
             pose_msg.orientation.x = quaternion[0]
@@ -119,7 +131,7 @@ class ArucoDetectorNode_Realsense(Node):
             self.detected_pub.publish(Bool(data=True))
 
             self.get_logger().info(
-                f'marker x={tvec[0]:+.3f} y={tvec[1]:+.3f} z={tvec[2]:.3f}',
+                f'marker L/R={lateral:+.3f} m ({dx_px:+.0f} px) dist={tvec[2]:.3f} m',
                 throttle_duration_sec=0.5)
         else:
             self.detected_pub.publish(Bool(data=False))

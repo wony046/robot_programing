@@ -115,4 +115,5 @@ ros2 run marker_detection detection_realsense
 | `/robot_state` | `twolink_msgs/XYpos` | 실제(또는 dummy) 로봇 관절각 |
 | `/des_value` | `twolink_msgs/CMD` | 로봇 목표값 |
 | `/joint_states` | `sensor_msgs/JointState` | RViz 표시용 관절각 |
-| `/aruco/pose` | `geometry_msgs/Pose` | 마커 자세 |
+| `/aruco/pose` | `geometry_msgs/Pose` | x: 영상 중앙 세로선과의 좌우 거리, z: 마커 거리 [m] |
+| `/aruco/detected` | `std_msgs/Bool` | 프레임별 마커 인식 여부 (false 면 즉시 정지) |

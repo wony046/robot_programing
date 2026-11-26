@@ -8,7 +8,7 @@
       o_c(q) = L1*[c1, s1] + R(q1+q2) [cx, cy]         (카메라 광학중심)
       d(q)   = [cos(q1+q2+yaw), sin(q1+q2+yaw)]          (광축 방향)
       x(q)   = [sin(..), -cos(..)]                         (영상 오른쪽 방향)
-      p      = o_c + X*x + Z*d                             (X, Z: 카메라 좌표계 마커 위치)
+      p      = o_c + X*x + Z*d                             (X: 영상 중앙 세로선과 마커의 좌우 거리, Z: 마커 거리)
 
 [2] 목표: 마커가 광축 위(영상 좌우 중앙), 거리 D 에 오도록
       p = L1*[c1, s1] + R(q1+q2) [cx + D, cy]
@@ -121,7 +121,7 @@ class VisualServoNode(Node):
 
         p = self.declare_parameter
         self.desired_distance = p('desired_distance', 0.30).value   # [m]
-        self.max_joint_vel = p('max_joint_vel', 1.5).value  # [rad/s]
+        self.max_joint_vel = p('max_joint_vel', 2.0).value  # [rad/s]
         self.gain = p('gain', 6.0).value                    # 목표각 추종 게인 [1/s]
         self.filter_alpha = p('filter_alpha', 0.5).value    # 마커 base 좌표 저역통과 (1: 필터 없음)
         self.deadband = p('deadband', 0.008).value          # 목표각 오차 무시 범위 [rad]
@@ -133,7 +133,7 @@ class VisualServoNode(Node):
         self.marker_timeout = p('marker_timeout', 0.5).value  # [s]
         # 목표각이 실제 관절각보다 앞설 수 있는 최대값 [rad].
         # 작을수록 정지 명령 후 로봇이 덜 미끄러지고, 클수록 빠르게 움직인다.
-        self.max_lead = p('max_lead', 0.15).value
+        self.max_lead = p('max_lead', 0.4).value
         self.state_timeout = p('state_timeout', 0.5).value    # [s]
         self.rate = p('rate', 20.0).value                   # [Hz]
         # 관절 회전 제한 (기본: 사용 안 함). use_joint_limits:=true 면 아래 범위 적용
