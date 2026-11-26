@@ -18,9 +18,15 @@
       cos(g) = (|p|^2 - L1^2 - r2^2) / (2 L1 r2)          (g: 가상 팔꿈치 각)
       q1     = atan2(py, px) - atan2(r2 sin g, L1 + r2 cos g)
       q2     = g - b
-    두 해(g = +-acos) 중 현재 자세에 가까운 해를 선택.
-    D 로는 팔이 닿지 않거나 관절 한계를 넘으면, 한계 안에서 마커를 중앙에 두는
-    해 중 거리가 D 에 가장 가까운 해를 고른다 (중앙 정렬 우선).
+    두 해(g = +-acos) 중 하나만 사용 (elbow 파라미터).
+    g 가 0 또는 pi 근처(팔이 완전히 펴짐/접힘)는 특이점이라 마커가 조금만 흔들려도
+    해가 크게 튄다 -> |g| 를 [m, pi - m] 안으로 제한 (singularity_margin).
+    D 로는 팔이 닿지 않거나 관절 범위를 넘으면, 범위 안에서 마커를 중앙에 두는
+    해 중 거리가 D 에 가장 가까운 해를 고른다 (방향 우선, 거리 2순위).
+
+    관절각 범위: 보드는 관절각을 (-pi, pi] 로 보고하지만 목표각은 wrap 하지 않는다.
+    목표와 측정이 +-pi 경계를 사이에 두면 보드가 오차를 약 2pi 로 보고 반대로
+    휘두른다 -> 목표각은 항상 [-angle_limit, angle_limit] (기본 3.0 rad) 안에만 둔다.
 
 [3] 목표각으로 속도 제한을 두고 부드럽게 이동 -> des_value 발행
 
@@ -64,30 +70,39 @@ def camera_ik(p, D, L1, cx, cy, yaw, q_ref):
     return best, D, reachable
 
 
-def camera_ik_all(p, D, L1, cx, cy, yaw, q_ref):
-    """camera_ik 의 두 해(팔꿈치 +/-)를 모두 반환: ([q_a, q_b], D_actual, reachable)"""
+def camera_ik_all(p, D, L1, cx, cy, yaw, q_ref=None, margin=0.3):
+    """두 해(팔꿈치 +/-)를 모두 반환: ([q_a, q_b], D_actual, reachable)
+
+    가상 팔꿈치각 |g| 를 [margin, pi - margin] 으로 제한해 특이점을 피한다.
+    D 로 그 범위를 만족할 수 없으면 경계의 g 로 D 를 다시 계산한다 (reachable=False).
+    관절각은 (-pi, pi] 로 정규화해서 반환한다.
+    """
     rho = float(np.hypot(p[0], p[1]))
     c = np.array([cx, cy])                       # link2 좌표계 카메라 위치
     u = np.array([math.cos(yaw), math.sin(yaw)])  # link2 좌표계 광축 방향
     v = c + D * u                                 # 가상 link2 벡터 (joint2 -> 마커)
     r2 = float(np.hypot(v[0], v[1]))
-    reachable = abs(L1 - r2) <= rho <= L1 + r2
-    if not reachable:
-        # 거리를 맞출 수 없으면 가능한 가장 가까운 r2 로 (중앙 정렬은 유지)
-        r2 = min(max(r2, abs(rho - L1) + 1e-6), rho + L1 - 1e-6)
+    cg = (rho * rho - L1 * L1 - r2 * r2) / (2.0 * L1 * r2)
+    cg_lo, cg_hi = math.cos(math.pi - margin), math.cos(margin)
+    reachable = cg_lo <= cg <= cg_hi
+    if reachable:
+        g0 = math.acos(cg)
+    else:
+        # 특이점/도달 불가 -> 경계 팔꿈치각에서 마커까지 닿는 r2 (=> D) 로 대체
+        g0 = math.acos(min(max(cg, cg_lo), cg_hi))
+        r2 = -L1 * math.cos(g0) + math.sqrt(max(rho * rho - (L1 * math.sin(g0)) ** 2, 0.0))
+        r2 = max(r2, float(np.hypot(*c)) + 1e-3)
         cu = float(c @ u)
         D = -cu + math.sqrt(max(cu * cu - float(c @ c) + r2 * r2, 0.0))
         v = c + D * u
         r2 = float(np.hypot(v[0], v[1]))
+        g0 = math.acos(min(max((rho * rho - L1 * L1 - r2 * r2) / (2.0 * L1 * r2), -1.0), 1.0))
     b = math.atan2(v[1], v[0])
-    cg = (rho * rho - L1 * L1 - r2 * r2) / (2.0 * L1 * r2)
-    g0 = math.acos(max(-1.0, min(1.0, cg)))
     sols = []
     for g in (g0, -g0):
         q1 = math.atan2(p[1], p[0]) - math.atan2(r2 * math.sin(g), L1 + r2 * math.cos(g))
         q2 = g - b
-        # 현재 자세와 가장 가까운 동치각으로 (2pi 점프 방지)
-        sols.append(np.array([q_ref[0] + wrap(q1 - q_ref[0]), q_ref[1] + wrap(q2 - q_ref[1])]))
+        sols.append(np.array([wrap(q1), wrap(q2)]))
     return sols, D, reachable
 
 
@@ -105,7 +120,7 @@ def pick_branch(sols, branch, q_ref):
     return [min(sols, key=lambda q: float(np.sum((q - q_ref) ** 2)))]
 
 
-def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim, branch=0,
+def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim, branch=0, margin=0.3,
                       d_min=0.12, d_max=0.80, d_step=0.01):
     """관절 한계를 고려한 역기구학 (두 해 중 branch 로 하나만 사용).
 
@@ -119,13 +134,13 @@ def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim, branch=0,
     n = int(round((d_max - d_min) / d_step))
     cands = sorted({D} | {d_min + i * d_step for i in range(n + 1)}, key=lambda d: abs(d - D))
     for d in cands:
-        sols, d_act, reachable = camera_ik_all(p, d, L1, cx, cy, yaw, q_ref)
+        sols, d_act, reachable = camera_ik_all(p, d, L1, cx, cy, yaw, q_ref, margin)
         if not reachable:
             continue
         ok = [q for q in pick_branch(sols, branch, q_ref) if inside(q)]
         if ok:
             return min(ok, key=lambda q: float(np.sum((q - q_ref) ** 2))), d_act, True
-    sols, d_act, _ = camera_ik_all(p, D, L1, cx, cy, yaw, q_ref)
+    sols, d_act, _ = camera_ik_all(p, D, L1, cx, cy, yaw, q_ref, margin)
     q = pick_branch(sols, branch, q_ref)[0]
     return np.array([np.clip(q[0], *q1_lim), np.clip(q[1], *q2_lim)]), d_act, False
 
@@ -160,14 +175,18 @@ class VisualServoNode(Node):
         self.max_lead = p('max_lead', 0.4).value
         self.state_timeout = p('state_timeout', 0.5).value    # [s]
         self.rate = p('rate', 20.0).value                   # [Hz]
-        # 관절 회전 제한 (기본: 사용 안 함). use_joint_limits:=true 면 아래 범위 적용
+        # 관절각 범위. 보드가 목표각을 wrap 하지 않으므로 +-pi 경계는 절대 넘지 않는다.
+        a = min(abs(p('angle_limit', 3.0).value), math.pi - 0.02)
+        # use_joint_limits:=true 면 아래의 더 좁은 범위를 추가로 적용
         self.use_joint_limits = p('use_joint_limits', False).value
         if self.use_joint_limits:
-            self.q1_lim = (p('q1_min', -1.57).value, p('q1_max', 1.57).value)
-            self.q2_lim = (p('q2_min', -2.4).value, p('q2_max', 2.4).value)
+            self.q1_lim = (max(p('q1_min', -1.57).value, -a), min(p('q1_max', 1.57).value, a))
+            self.q2_lim = (max(p('q2_min', -2.4).value, -a), min(p('q2_max', 2.4).value, a))
         else:
-            self.q1_lim = (-math.inf, math.inf)
-            self.q2_lim = (-math.inf, math.inf)
+            self.q1_lim = (-a, a)
+            self.q2_lim = (-a, a)
+        # 특이점(팔이 완전히 접히거나 펴짐) 회피 여유 [rad]
+        self.sing_margin = p('singularity_margin', 0.3).value
         # 로봇 / 카메라 장착 기하 (link2 좌표계 기준)
         self.L1 = p('link1_length', 0.143).value
         self.cam_x = p('camera_offset_x', 0.06).value
@@ -211,10 +230,14 @@ class VisualServoNode(Node):
             self.qvel = np.zeros(2)
         self.q_time = time.monotonic()
 
+    def clip_q(self, q):
+        """목표각을 허용 범위([-angle_limit, angle_limit]) 안으로."""
+        return np.array([np.clip(q[0], *self.q1_lim), np.clip(q[1], *self.q2_lim)])
+
     def estimate_q(self):
-        """지금 이 순간의 실제 관절각 추정 (마지막 측정 + 속도 x 경과시간)."""
+        """지금 이 순간의 실제 관절각 추정 (마지막 측정 + 속도 x 경과시간), 범위 안으로."""
         age = min(time.monotonic() - self.q_time, 0.15)
-        return self.q + self.qvel * age
+        return self.clip_q(self.q + self.qvel * age)
 
     def detected_callback(self, msg):
         if msg.data:
@@ -290,7 +313,7 @@ class VisualServoNode(Node):
         q_goal, D, ok = camera_ik_limited(
             self.p_marker, self.D_eff, self.L1,
             self.cam_x, self.cam_y, self.cam_yaw, self.q_cmd, self.q1_lim, self.q2_lim,
-            branch=self.branch)
+            branch=self.branch, margin=self.sing_margin)
         self.D_eff = D                      # 닿지 않는 거리면 가능한 거리로 (적분 누적 방지)
         reachable = ok and abs(D - self.desired_distance) < 0.005
         self.q_goal = q_goal
@@ -304,10 +327,9 @@ class VisualServoNode(Node):
             q_dot *= self.max_joint_vel / peak
         q_new = self.q_cmd + q_dot * self.dt
         # 실제 위치보다 max_lead 이상 앞서지 않게 (정지 시 미끄러짐 감소).
-        # 보드는 관절각을 (-pi, pi] 로 보고하므로 차이는 wrap 해서 계산한다.
+        # 목표·측정 모두 범위 안이므로 단순 차이 = 보드가 보는 오차.
         q_est = self.estimate_q()
-        lead = np.array([wrap(q_new[0] - q_est[0]), wrap(q_new[1] - q_est[1])])
-        self.q_cmd = q_est + np.clip(lead, -self.max_lead, self.max_lead)
+        self.q_cmd = self.clip_q(q_est + np.clip(q_new - q_est, -self.max_lead, self.max_lead))
 
         self.publish(self.q_cmd)
         self.commanded = True

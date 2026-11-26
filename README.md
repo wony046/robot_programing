@@ -98,7 +98,8 @@ Gazebo 없이 RViz만: `use_gazebo:=false` / 시각화 없이: `use_rviz:=false`
   RViz 에 마커 위치(파랑), 목표 카메라 위치(초록), 목표 시선(노랑)이 표시됩니다.
 - 관절이 수평 회전 2개뿐이라 좌우 중앙 정렬과 거리 유지만 제어합니다. 상하 정렬은 하지 않습니다.
 - 마커 인식에 실패하면 그 프레임에서 즉시 정지합니다 (`/aruco/detected`, `lost_frames` 기본 1). 팔이 닿지 않는 위치에서는 중앙 정렬을 우선합니다.
-- 관절 회전 제한은 기본으로 꺼져 있습니다. 켜려면 `use_joint_limits:=true` (q1 ±1.57, q2 ±2.4 rad, `q1_min/q1_max/q2_min/q2_max` 로 조정).
+- 관절각은 항상 ±3.0 rad (`angle_limit`) 안에서만 명령합니다. 보드가 관절각을 ±π 로 보고하면서 목표각은 wrap 하지 않아, ±π 를 넘는 명령은 로봇이 반대로 휘두르는 원인이 됩니다.
+- 팔이 완전히 접히거나 펴지는 특이점 근처(`singularity_margin`, 0.3 rad)는 피합니다. 더 좁은 제한: `use_joint_limits:=true` + `q1_min/q1_max/q2_min/q2_max`.
 - 카메라 장착 위치(`camera_offset_x/y`, `camera_yaw`), 게인(`gain`, 기본 6), 속도 제한(`max_joint_vel`, 기본 1.5 rad/s)은 `visual_servo_node` 파라미터로 조정합니다.
 
 ### 5. 마커 인식만 실행
