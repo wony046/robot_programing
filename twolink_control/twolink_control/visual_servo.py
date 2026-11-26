@@ -91,12 +91,26 @@ def camera_ik_all(p, D, L1, cx, cy, yaw, q_ref):
     return sols, D, reachable
 
 
-def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim,
+def pick_branch(sols, branch, q_ref):
+    """역기구학 두 해 중 하나만 선택.
+
+    branch = +1 : 팔꿈치 + 해 (g >= 0, 초기 자세 q2 = +90도와 같은 쪽)
+    branch = -1 : 팔꿈치 - 해
+    branch =  0 : 현재 자세에 가까운 해
+    """
+    if branch > 0:
+        return [sols[0]]
+    if branch < 0:
+        return [sols[1]]
+    return [min(sols, key=lambda q: float(np.sum((q - q_ref) ** 2)))]
+
+
+def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim, branch=0,
                       d_min=0.12, d_max=0.80, d_step=0.01):
-    """관절 한계를 고려한 역기구학.
+    """관절 한계를 고려한 역기구학 (두 해 중 branch 로 하나만 사용).
 
     목표 거리 D 의 해가 관절 한계 밖이면, 마커를 영상 중앙에 두는 해 중에서
-    한계 안에 있고 거리가 D 에 가장 가까운 해를 고른다 (중앙 정렬 우선).
+    한계 안에 있고 거리가 D 에 가장 가까운 해를 고른다 (방향 우선, 거리 2순위).
     반환: (q, D_actual, ok)  ok=False 면 한계 안의 해가 없어 가장 가까운 해를 잘라서 반환
     """
     def inside(q):
@@ -108,10 +122,11 @@ def camera_ik_limited(p, D, L1, cx, cy, yaw, q_ref, q1_lim, q2_lim,
         sols, d_act, reachable = camera_ik_all(p, d, L1, cx, cy, yaw, q_ref)
         if not reachable:
             continue
-        ok = [q for q in sols if inside(q)]
+        ok = [q for q in pick_branch(sols, branch, q_ref) if inside(q)]
         if ok:
             return min(ok, key=lambda q: float(np.sum((q - q_ref) ** 2))), d_act, True
-    q, d_act, _ = camera_ik(p, D, L1, cx, cy, yaw, q_ref)
+    sols, d_act, _ = camera_ik_all(p, D, L1, cx, cy, yaw, q_ref)
+    q = pick_branch(sols, branch, q_ref)[0]
     return np.array([np.clip(q[0], *q1_lim), np.clip(q[1], *q2_lim)]), d_act, False
 
 
@@ -123,7 +138,16 @@ class VisualServoNode(Node):
         self.desired_distance = p('desired_distance', 0.30).value   # [m]
         self.max_joint_vel = p('max_joint_vel', 2.0).value  # [rad/s]
         self.gain = p('gain', 6.0).value                    # 목표각 추종 게인 [1/s]
-        self.filter_alpha = p('filter_alpha', 0.5).value    # 마커 base 좌표 저역통과 (1: 필터 없음)
+        # 마커 추정 필터 (1: 필터 없음). 방향(좌우)은 픽셀 기반이라 정확 -> 빠르게 반영,
+        # 거리는 PnP 추정이라 노이즈가 큼 -> 강하게 평활 (방향 1순위, 거리 2순위)
+        self.filter_dir = p('filter_direction', 0.7).value
+        self.filter_dist = p('filter_distance', 0.25).value
+        # 거리 목표를 현재 거리 -> desired_distance 로 옮기는 속도 [m/s].
+        # IK 해는 매 순간 마커를 세로선 위에 두므로 방향이 먼저 맞고 거리는 뒤따른다.
+        self.distance_rate = p('distance_rate', 0.25).value
+        # 역기구학 두 해 중 사용할 해: 'positive'(초기 자세 q2=+90도 쪽), 'negative', 'nearest'
+        elbow = str(p('elbow', 'positive').value).lower()
+        self.branch = {'positive': 1, 'negative': -1}.get(elbow, 0)
         self.deadband = p('deadband', 0.008).value          # 목표각 오차 무시 범위 [rad]
         # 마커 인식 실패 프레임이 lost_frames 개 연속이면 즉시 정지 (1: 한 프레임만 놓쳐도 정지)
         self.lost_frames = p('lost_frames', 1).value
@@ -157,6 +181,8 @@ class VisualServoNode(Node):
         self.q_time = 0.0
         self.missed = 0             # 연속 인식 실패 프레임 수
         self.p_marker = None        # 필터된 마커 base 좌표 [x, y]
+        self.marker_range = None    # 필터된 카메라-마커 거리 Z [m]
+        self.D_eff = None           # 지금 IK 에 쓰는 거리 목표 (desired_distance 로 점진 이동)
         self.marker_y = 0.0         # 카메라 좌표계 Y (표시용 높이)
         self.marker_time = 0.0
         self.q_cmd = None
@@ -217,9 +243,16 @@ class VisualServoNode(Node):
         now = time.monotonic()
         if self.p_marker is None or not self.tracking or now - self.marker_time > self.marker_timeout:
             self.p_marker = p_new       # 다시 보이기 시작하면 필터 초기화 (이전 위치 무시)
+            self.marker_range = Z
         else:
-            a = self.filter_alpha
-            self.p_marker = a * p_new + (1.0 - a) * self.p_marker
+            # 변화량을 시선 방향(거리)과 수직 방향(좌우 방향)으로 나눠 다른 가중치로 반영
+            los = p_new - o
+            los /= max(float(np.linalg.norm(los)), 1e-6)
+            delta = p_new - self.p_marker
+            d_par = float(delta @ los) * los        # 거리 성분
+            d_perp = delta - d_par                  # 방향 성분
+            self.p_marker = self.p_marker + self.filter_dir * d_perp + self.filter_dist * d_par
+            self.marker_range += self.filter_dist * (Z - self.marker_range)
         self.marker_y = msg.position.y
         self.marker_time = now
 
@@ -246,13 +279,20 @@ class VisualServoNode(Node):
         if not self.tracking:
             self.get_logger().info('Marker found -> tracking')
             self.q_cmd = self.estimate_q()
+            self.D_eff = self.marker_range   # 거리는 지금 거리에서 시작 (방향부터 맞춤)
             self.tracking = True
 
-        # [2] 역기구학으로 목표 관절각
+        # 거리 목표를 desired_distance 쪽으로 천천히 이동 (거리는 2순위)
+        step = self.distance_rate * self.dt
+        self.D_eff += float(np.clip(self.desired_distance - self.D_eff, -step, step))
+
+        # [2] 역기구학으로 목표 관절각 (마커를 세로선 위, 거리 D_eff 에)
         q_goal, D, ok = camera_ik_limited(
-            self.p_marker, self.desired_distance, self.L1,
-            self.cam_x, self.cam_y, self.cam_yaw, self.q_cmd, self.q1_lim, self.q2_lim)
-        reachable = ok and abs(D - self.desired_distance) < 1e-6
+            self.p_marker, self.D_eff, self.L1,
+            self.cam_x, self.cam_y, self.cam_yaw, self.q_cmd, self.q1_lim, self.q2_lim,
+            branch=self.branch)
+        self.D_eff = D                      # 닿지 않는 거리면 가능한 거리로 (적분 누적 방지)
+        reachable = ok and abs(D - self.desired_distance) < 0.005
         self.q_goal = q_goal
 
         # [3] 속도 제한을 두고 목표각으로 이동
@@ -275,7 +315,7 @@ class VisualServoNode(Node):
         self.log_throttled(
             f'marker base=({self.p_marker[0]:+.3f},{self.p_marker[1]:+.3f}) '
             f'| IK goal q=({q_goal[0]:+.3f},{q_goal[1]:+.3f})'
-            f'{"" if reachable else f" [target distance unreachable -> D={D:.2f}]"} '
+            f' D={D:.2f}{"" if reachable else f"->{self.desired_distance:.2f}"} '
             f'| q=({self.q[0]:+.3f},{self.q[1]:+.3f}) cmd=({self.q_cmd[0]:+.3f},{self.q_cmd[1]:+.3f})')
 
     def publish(self, q):
